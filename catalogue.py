@@ -8,19 +8,39 @@ from itertools import zip_longest
 
 LETTERS = "a-zA-Zа-яА-ЯёЁ"
 BOUNDARY = LETTERS + "0-9"
-CODE = (
-    rf"[0-9]+[{LETTERS}0-9]*"
-    rf"(?:[-_/][{LETTERS}0-9]+|\.[0-9]+[{LETTERS}0-9]*)*"
-    rf"(?:\([{LETTERS}0-9]+\)[0-9]*)*"
+PREFIX = rf"[{LETTERS}]+(?:/[{LETTERS}]+)*"
+QUALIFIED_HEAD = rf"(?:{PREFIX}[ ._\t-]*[0-9]|[0-9]+[-_]?[{LETTERS}]+[ ._\t-]*[0-9])"
+
+
+def name_patterns(split_lists):
+    guard = rf"(?!{QUALIFIED_HEAD})" if split_lists else ""
+    code = (
+        rf"[0-9]+[{LETTERS}0-9]*"
+        rf"(?:[-_][{LETTERS}0-9]+|\.[0-9]+[{LETTERS}0-9]*"
+        rf"|[ \t]*/[ \t]*{guard}(?:{PREFIX}[ ._\t-]+[0-9]+[{LETTERS}0-9]*|[{LETTERS}0-9]+)"
+        rf"|\([{LETTERS}0-9]+\)[0-9]*)*"
+    )
+    designation = re.compile(
+        rf"(?<![{BOUNDARY}])(?:{PREFIX}[ ._\t-]*{code}"
+        rf"|[0-9]+[-_]?[{LETTERS}]+[ ._\t-]*{code})(?![{BOUNDARY}])"
+    )
+    obj = re.compile(
+        rf"(?<![{BOUNDARY}])(?:obj(?:ect|ekt)?|объект(?:а|у|ом|е)?|工程|项目)"
+        rf"[ ._\t-]*(?:№|#)?\s*(?P<before>{code})"
+        rf"|(?<![{BOUNDARY}])(?P<after>{code})\s*(?:号)?(?:工程|项目)",
+        re.IGNORECASE,
+    )
+    return designation, obj
+
+
+NAME_PATTERNS = {split: name_patterns(split) for split in (False, True)}
+BIBLIOGRAPHIC = re.compile(
+    r"(?:pdf|tom|том|vol(?:ume)?|page|pp?)\.?[ \t]+[0-9]+(?:[-./][0-9]+)*",
+    re.IGNORECASE,
 )
-DESIGNATION = re.compile(
-    rf"(?<![{BOUNDARY}])(?:[{LETTERS}]+(?:/[{LETTERS}]+)*[ ._\t-]*{CODE}"
-    rf"|[0-9]+[-_]?[{LETTERS}]+[ ._\t-]*{CODE})(?![{BOUNDARY}])"
-)
-OBJECT = re.compile(
-    rf"(?<![{BOUNDARY}])(?:obj(?:ect|ekt)?|объект(?:а|у|ом|е)?|工程|项目)"
-    rf"[ ._\t-]*(?:№|#)?\s*(?P<before>{CODE})"
-    rf"|(?<![{BOUNDARY}])(?P<after>{CODE})\s*(?:号)?(?:工程|项目)",
+PROSE_NUMBER = re.compile(r"(?:is|am|an|to|i|и|в|с)\s+[0-9]+")
+QUANTITY_TAIL = re.compile(
+    r"\s+(?:years?|months?|days?|hours?|minutes?|seconds?|году|года|лет)\b",
     re.IGNORECASE,
 )
 CYRILLIC = dict(
@@ -49,17 +69,27 @@ def folded(text):
 
 
 def signature(text):
-    """Numeric runs stay separate: T-34-85 never becomes T-3485."""
-    return tuple(re.findall(r"[a-z]+|[0-9]+|[/()]", folded(text)))
+    """Retain explicit numeric segments before optional-separator fallback."""
+    return tuple(re.findall(r"[a-z]+|[0-9]+|[/()]", strict_key(text)))
 
 
 def spelling_key(text):
-    value = prepared(text).replace("_", "-")
+    value = re.sub(r"[ \t]*/[ \t]*", "/", prepared(text)).replace("_", "-")
+    value = re.sub(r"/(?=[0-9])", "-", value)
     return re.sub(rf"^([{LETTERS}]+(?:/[{LETTERS}]+)*)[ .\t-]+(?=[0-9])", r"\1", value)
 
 
 def strict_key(text):
     return spelling_key(folded(text))
+
+
+def separator_positions(key):
+    position = 0
+    positions = set()
+    for part in key.split("-")[:-1]:
+        position += len(part)
+        positions.add(position)
+    return positions
 
 
 @dataclass(frozen=True)
@@ -69,36 +99,62 @@ class Reference:
     parts: tuple
 
 
-def references(text):
+def references(text, *, split_lists=False):
     text = prepared(text)
+    designation, obj = NAME_PATTERNS[split_lists]
     occupied = []
     found = []
-    for match in OBJECT.finditer(text):
+    for match in obj.finditer(text):
         code = match["before"] or match["after"]
         occupied.append(match.span())
         found.append(
             (
                 match.start(),
+                match.end(),
                 Reference(
-                    match[0], "object:" + folded(code), ("object", *signature(code))
+                    match[0], "object:" + strict_key(code), ("object", *signature(code))
                 ),
             )
         )
-    for match in DESIGNATION.finditer(text):
+    for match in designation.finditer(text):
         if any(match.start() < end and match.end() > start for start, end in occupied):
             continue
         found.append(
             (
                 match.start(),
+                match.end(),
                 Reference(match[0], strict_key(match[0]), signature(match[0])),
             )
         )
-    yield from (ref for _, ref in sorted(found, key=lambda item: item[0]))
+    previous_end = 0
+    for start, end, ref in sorted(found, key=lambda item: item[0]):
+        if BIBLIOGRAPHIC.fullmatch(ref.text):
+            continue
+        if PROSE_NUMBER.fullmatch(ref.text) and QUANTITY_TAIL.match(text[end:]):
+            continue
+        before = start - 1
+        while before >= 0 and text[before].isspace():
+            before -= 1
+        # A slash list continues an already parsed name, not an arbitrary path.
+        if (
+            before >= 0
+            and text[before] == "/"
+            and text[previous_end:start].strip() != "/"
+        ):
+            continue
+        yield ref
+        previous_end = end
 
 
 def query_references(question, aliases=DEFAULT_ALIASES):
     lookup = prepared(question)
+    if isinstance(aliases, str):
+        aliases = aliases.splitlines()
+    elif not isinstance(aliases, (list, tuple)):
+        aliases = DEFAULT_ALIASES
     for rule in aliases:
+        if not isinstance(rule, str):
+            continue
         left, separator, right = rule.partition("=")
         left, right = left.strip(), right.strip()
         if separator and left and right:
@@ -108,18 +164,7 @@ def query_references(question, aliases=DEFAULT_ALIASES):
                 lookup,
                 flags=re.IGNORECASE,
             )
-    prose_context = re.search(r"[A-Za-zА-Яа-я]", question) and not re.search(
-        r"[\u4e00-\u9fff]", question
-    )
-    for ref in references(lookup):
-        # Corpus membership alone cannot turn 'is 3 years' into an IS model.
-        if (
-            prose_context
-            and lookup.strip() != ref.text
-            and re.match(r"^(is|am|an|to|i|и|в|с)\s+[0-9]", ref.text)
-        ):
-            continue
-        yield ref
+    yield from references(lookup)
 
 
 @dataclass(frozen=True)
@@ -150,11 +195,13 @@ class Catalogue:
         self.counts = Counter()
         self.exact = defaultdict(set)
         self.loose = defaultdict(set)
+        self.compact = defaultdict(set)
         for text in texts:
             for ref in references(text):
                 self.counts[ref.text] += 1
                 self.exact[ref.key].add(ref.text)
                 self.loose[ref.parts].add(ref.text)
+                self.compact[ref.key.replace("-", "")].add(ref.key)
 
     @classmethod
     def merge(cls, catalogues):
@@ -165,12 +212,52 @@ class Catalogue:
                 merged.exact[key].update(labels)
             for key, labels in catalogue.loose.items():
                 merged.loose[key].update(labels)
+            for key, keys in catalogue.compact.items():
+                merged.compact[key].update(keys)
         return merged
+
+    def candidates(self, ref):
+        candidates = self.exact.get(ref.key) or self.loose.get(ref.parts, ())
+        if candidates:
+            return candidates
+        boundaries = separator_positions(ref.key)
+        return {
+            label
+            for key in self.compact.get(ref.key.replace("-", ""), ())
+            if boundaries <= separator_positions(key)
+            for label in self.exact[key]
+        }
+
+    def resolve(self, ref):
+        candidates = self.candidates(ref)
+        if candidates:
+            yield ref, candidates
+            return
+        # Prefer a complete source expression before splitting a slash list.
+        parts = list(references(ref.text, split_lists=True))
+        if len(parts) < 2:
+            return
+        start = 0
+        while start < len(parts):
+            for end in range(len(parts), start, -1):
+                joined = "/".join(part.text for part in parts[start:end])
+                combined = list(references(joined))
+                candidates = self.candidates(combined[0]) if len(combined) == 1 else ()
+                if candidates:
+                    yield combined[0], candidates
+                    start = end
+                    break
+            else:
+                start += 1
 
     def expand(self, question, aliases=DEFAULT_ALIASES, max_aliases=8):
         pools = {}
-        for ref in query_references(question, aliases):
-            candidates = self.exact.get(ref.key) or self.loose.get(ref.parts, ())
+        resolved = (
+            item
+            for ref in query_references(question, aliases)
+            for item in self.resolve(ref)
+        )
+        for ref, candidates in resolved:
             written_key = spelling_key(ref.text)
             explicit = {
                 label for label in candidates if spelling_key(label) == written_key

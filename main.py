@@ -14,7 +14,12 @@ class EquipmentRAGPlugin(Star):
 
     async def initialize(self):
         self.integration.install()
+        await self.integration.warm()
         self.logger.info("装备检索已启用语料写法匹配；检索与Rerank沿用原生配置。")
+
+    @filter.on_astrbot_loaded()
+    async def warm_catalogue(self):
+        await self.integration.warm()
 
     @filter.on_llm_request(priority=10)
     async def guide_search(self, event: AstrMessageEvent, req: ProviderRequest):

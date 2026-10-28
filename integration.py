@@ -7,15 +7,23 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
 
-from .catalogue import DEFAULT_ALIASES
+from .catalogue import DEFAULT_ALIASES, Query, query_references
 from .neighbours import extend
 from .storage import Catalogues
 
 GUIDANCE_MARKER = "[装备检索说明]"
 GUIDANCE = (
     GUIDANCE_MARKER
-    + "检索保留原问题的完整名称、数字、改型后缀与年代限定；比较对象可分别检索。候选写法不证明型号相同，回答须按具体来源归属参数，可结合同文档连续段落理解代指。"
+    + "检索保留原问题的完整名称、数字、改型后缀与年代限定；斜线也可能属于完整改型名称。比较对象可分别检索，候选写法不证明型号相同，回答须按具体来源归属参数，可结合同文档连续段落理解代指。"
 )
+
+
+def integer_option(config, name, default, minimum, maximum):
+    try:
+        value = int(config.get(name, default))
+    except (TypeError, ValueError, OverflowError):
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 @dataclass
@@ -38,6 +46,26 @@ class NativeIntegration:
     def enabled(self):
         return self.active and self.config.get("enabled", True)
 
+    def sources(self, names=None):
+        return {
+            kb_id: helper.vec_db.document_storage.db_path
+            for kb_id, helper in self.manager.kb_insts.items()
+            if not helper.init_error and (names is None or helper.kb.kb_name in names)
+        }
+
+    async def read_catalogue(self, sources):
+        try:
+            return await asyncio.to_thread(
+                self.catalogues.read, sources, tuple(self.manager.kb_insts)
+            )
+        except (OSError, sqlite3.Error) as error:
+            self.logger.warning("型号词表暂不可读，沿用原生查询：%s", error)
+            return None
+
+    async def warm(self):
+        if self.enabled() and (sources := self.sources()):
+            await self.read_catalogue(sources)
+
     def install(self):
         if self.active:
             return
@@ -51,24 +79,19 @@ class NativeIntegration:
             if not self.enabled():
                 return await original(*args, **kwargs)
             bound = signature.bind(*args, **kwargs)
-            names = bound.arguments["kb_names"]
-            sources = {
-                kb_id: helper.vec_db.document_storage.db_path
-                for kb_id, helper in self.manager.kb_insts.items()
-                if helper.kb.kb_name in names and not helper.init_error
-            }
-            try:
-                catalogue = await asyncio.to_thread(
-                    self.catalogues.read, sources, tuple(self.manager.kb_insts)
+            sources = self.sources(bound.arguments["kb_names"])
+            question = bound.arguments["query"]
+            aliases = self.config.get("aliases", DEFAULT_ALIASES)
+            query = Query(question, ())
+            if next(query_references(question, aliases), None) is not None:
+                catalogue = await self.read_catalogue(sources)
+                if catalogue is None:
+                    return await original(*args, **kwargs)
+                query = catalogue.expand(
+                    question,
+                    aliases,
+                    integer_option(self.config, "max_aliases", 8, 1, 32),
                 )
-            except (OSError, sqlite3.Error) as error:
-                self.logger.warning("型号词表暂不可读，沿用原生查询：%s", error)
-                return await original(*args, **kwargs)
-            query = catalogue.expand(
-                bound.arguments["query"],
-                self.config.get("aliases", DEFAULT_ALIASES),
-                max(1, min(32, int(self.config.get("max_aliases", 8)))),
-            )
             bound.arguments["query"] = query.text
             self.hook_fusion()
             call = Call(
@@ -105,10 +128,6 @@ class NativeIntegration:
                     for match in query.matches
                 ],
             }
-            if self.config.get("llm_guidance", True):
-                output["context_text"] = (
-                    result.get("context_text", "") + "\n" + GUIDANCE
-                )
             if anchors:
                 output["equipment_context"] = []
                 context = output.get("context_text", "")
@@ -143,8 +162,8 @@ class NativeIntegration:
             call = self.state.get()
             if not self.enabled() or call is None or not call.rerank:
                 return candidates
-            radius = max(0, min(3, int(self.config.get("neighbor_chunks", 1))))
-            budget = max(0, min(32, int(self.config.get("context_budget", 4))))
+            radius = integer_option(self.config, "neighbor_chunks", 1, 0, 3)
+            budget = integer_option(self.config, "context_budget", 4, 0, 32)
             try:
                 output, call.links = await asyncio.to_thread(
                     extend, candidates, call.sources, radius, budget
