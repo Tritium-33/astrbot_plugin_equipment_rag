@@ -1,7 +1,7 @@
 name: astrbot_plugin_equipment_rag
 display_name: 装备型号检索
 author: Tritium-33
-version: 0.3.1
+version: 0.4.0
 desc: 依据所选知识库原文扩展型号写法，保留原生候选、检索与 Rerank。
 astrbot_version: ">=4.29.3,<4.30"
 repo: https://github.com/Tritium-33/astrbot_plugin_equipment_rag

@@ -14,7 +14,7 @@ from .storage import Catalogues
 GUIDANCE_MARKER = "[装备检索说明]"
 GUIDANCE = (
     GUIDANCE_MARKER
-    + "检索保留原问题的完整名称、数字、改型后缀与年代限定；斜线也可能属于完整改型名称。比较对象可分别检索，候选写法不证明型号相同，回答须按具体来源归属参数，可结合同文档连续段落理解代指。"
+    + "检索保留完整问题、组合表达式、数字、改型后缀与年代限定。查询写法信息仅用于查找文献；完整写法出现过不证明独立型号，组成项不代表并列对象。依据原文及同文档连续段落区分名称用法、实际安装、试装、拟议、未采用和比较关系，再归属参数与时期；前段交代对象而后段使用代指时结合阅读。"
 )
 
 
@@ -125,12 +125,17 @@ class NativeIntegration:
                 "query": query.original,
                 "candidates": [
                     {"written": match.written, "source_forms": list(match.candidates)}
-                    for match in query.matches
+                    for root in query.matches
+                    for match in root.primary()
                 ],
+                "expressions": [match.as_dict() for match in query.matches],
             }
+            context = output.get("context_text", "")
+            if query.expression_context:
+                context += "\n" + query.expression_context
+            output["context_text"] = context
             if anchors:
                 output["equipment_context"] = []
-                context = output.get("context_text", "")
                 for seed in anchors.values():
                     output["equipment_context"].append(
                         {
