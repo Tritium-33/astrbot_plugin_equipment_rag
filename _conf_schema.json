@@ -1,0 +1,43 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用资料中的型号写法匹配"
+  },
+  "max_aliases": {
+    "type": "int",
+    "default": 8,
+    "description": "每次查询最多补充的原文写法数量",
+    "hint": "1–32；不增加Embedding或Rerank调用次数。"
+  },
+  "aliases": {
+    "type": "list",
+    "default": [
+      "拉格=LaGG",
+      "拉=La",
+      "米格=MiG",
+      "雅克=Yak",
+      "伊尔=Il",
+      "LaG-3=LaGG-3"
+    ],
+    "description": "补充写法，每项写成别名=资料写法",
+    "hint": "仅在选定知识库含有对应名称时用于扩展查询；不把两种名称宣布为同一型号。通常无需添加新装备，程序从资料读取名称。"
+  },
+  "llm_guidance": {
+    "type": "bool",
+    "default": true,
+    "description": "提示模型按完整名称、改型和来源归属参数"
+  },
+  "neighbor_chunks": {
+    "type": "int",
+    "default": 1,
+    "description": "检查同文档前后相邻块数",
+    "hint": "0–3；只读原文，不判定相邻段落一定属于同一型号。"
+  },
+  "context_budget": {
+    "type": "int",
+    "default": 4,
+    "description": "最多新增多少相邻块进入原生Rerank",
+    "hint": "0–32；仅配置Rerank时生效。不会增加API调用次数，但会增加本次Rerank处理文本。0为关闭。"
+  }
+}
